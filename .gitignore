@@ -1,0 +1,14 @@
+node_modules/
+dist/
+test-results/
+*.traineddata
+*.log
+.DS_Store
+
+# Private payroll data and local verification outputs
+*.json.backup
+*.salarybook
+*.traineddata
+private-ocr-result.json
+private-test-output/
+work/
