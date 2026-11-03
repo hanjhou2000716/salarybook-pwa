@@ -3,7 +3,7 @@ import {createHash} from 'node:crypto';
 import path from 'node:path';
 await mkdir('dist',{recursive:true});
 for(const f of ['index.html','style.css','manifest.webmanifest','icon.svg'])await copyFile(f,`dist/${f}`);
-await cp('src','dist/src',{recursive:true});await cp('icons','dist/icons',{recursive:true});
+await cp('src','dist/src',{recursive:true});await copyFile('src/app.js','dist/src/app-v1.2.js');await cp('icons','dist/icons',{recursive:true});
 for(const dir of ['tesseract','core','lang','pdf'])await mkdir(`dist/vendor/${dir}`,{recursive:true});
 for(const f of ['tesseract.min.js','worker.min.js'])await copyFile(`node_modules/tesseract.js/dist/${f}`,`dist/vendor/tesseract/${f}`);
 for(const f of await readdir('node_modules/tesseract.js-core'))if(f.endsWith('.wasm')||f.endsWith('.wasm.js'))await copyFile(`node_modules/tesseract.js-core/${f}`,`dist/vendor/core/${f}`);
