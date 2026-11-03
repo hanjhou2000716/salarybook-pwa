@@ -1,4 +1,4 @@
-# 薪資簿 SalaryBook V1.1
+# 薪資簿 SalaryBook V1.2
 
 繁體中文、本機優先的薪資紀錄 PWA，支援 Android 與桌面瀏覽器。程式部署到 GitHub Pages；薪資資料留在使用者目前裝置的 IndexedDB。
 
@@ -8,6 +8,7 @@
 - 匯入薪資單：兩頁 JPG、PNG、PDF，本機 OCR 及人工確認。
 - 本機備份：支援密碼加密、還原預覽、合併與 CSV 匯出。
 - 離線 PWA：Service Worker 預快取網站、PDF 引擎、OCR 模型。
+- 手機安裝：Android Chrome 提供安裝提示或選單指引；iPhone Safari 提供「分享 → 加入主畫面」步驟。
 
 ## 本機啟動
 
@@ -41,3 +42,11 @@ npm run dev
 ## 測試
 
 `npm test` 驗證虛構示範紀錄、收入與現金流圖表加總、月份缺口、同月多筆薪資、篩選及備份相容性。Actions 會在部署前執行核心測試與建置。
+
+`npm run test:browser` 另以桌面 Chrome 測試圖表與手機尺寸、安裝提示狀態、iPhone/Android 安裝指引、PWA 圖示、離線準備及離線重新開啟。這些瀏覽器模擬不取代實際 Android 或 iPhone 安裝測試。
+
+## 手機安裝
+
+在手機系統瀏覽器開啟 Pages 網址後，首頁的「安裝到手機」會顯示對應步驟。Android Chrome 若提供安裝視窗，可由按鈕啟動；若沒有，請使用 Chrome 選單的「安裝應用程式」或「新增至主畫面」。iPhone/iPad 請在 Safari 點「分享」→「加入主畫面」。LINE 等 App 內建瀏覽器請先改用 Safari 或 Chrome。
+
+只有從主畫面以 App 模式開啟時，頁面才會顯示「正在使用 App 模式」。首次開啟時，請保持網路連線直到離線資源狀態顯示「可離線使用」。薪資資料仍留在原本瀏覽器的 IndexedDB；換裝置、換瀏覽器或更換開啟方式時，請使用「資料與設定」中的備份與還原。
