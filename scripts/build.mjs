@@ -1,21 +1,53 @@
-import {mkdir,cp,copyFile,readdir,readFile,writeFile} from 'node:fs/promises';
+import {mkdir,cp,copyFile,readdir,readFile,writeFile,rm,stat} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import path from 'node:path';
-await mkdir('dist',{recursive:true});
-for(const f of ['index.html','style.css','manifest.webmanifest','icon.svg'])await copyFile(f,`dist/${f}`);
-await cp('src','dist/src',{recursive:true});await copyFile('src/app.js','dist/src/app-v1.2.js');await cp('icons','dist/icons',{recursive:true});
-for(const dir of ['tesseract','core','lang','pdf'])await mkdir(`dist/vendor/${dir}`,{recursive:true});
-for(const f of ['tesseract.min.js','worker.min.js'])await copyFile(`node_modules/tesseract.js/dist/${f}`,`dist/vendor/tesseract/${f}`);
-for(const f of await readdir('node_modules/tesseract.js-core'))if(f.endsWith('.wasm')||f.endsWith('.wasm.js'))await copyFile(`node_modules/tesseract.js-core/${f}`,`dist/vendor/core/${f}`);
-for(const lang of ['chi_tra','eng'])await copyFile(`node_modules/@tesseract.js-data/${lang}/4.0.0/${lang}.traineddata.gz`,`dist/vendor/lang/${lang}.traineddata.gz`);
-for(const f of ['pdf.mjs','pdf.worker.mjs'])await copyFile(`node_modules/pdfjs-dist/build/${f}`,`dist/vendor/pdf/${f}`);
-for(const d of ['cmaps','standard_fonts'])await cp(`node_modules/pdfjs-dist/${d}`,`dist/vendor/pdf/${d}`,{recursive:true});
-await mkdir('dist/licenses',{recursive:true});
-for(const [pkg,target] of [['tesseract.js','tesseract'],['tesseract.js-core','tesseract-core'],['pdfjs-dist','pdfjs']]){const files=await readdir(`node_modules/${pkg}`);const license=files.find(f=>/^LICENSE/i.test(f));if(license)await copyFile(`node_modules/${pkg}/${license}`,`dist/licenses/${target}.txt`);}
-await writeFile('dist/licenses/models.txt','Tesseract traineddata: Apache-2.0. https://github.com/tesseract-ocr/tessdata https://github.com/naptha/tessdata');
-await writeFile('dist/.nojekyll','');
-async function walk(dir){let out=[];for(const f of await readdir(dir,{withFileTypes:true})){const p=path.join(dir,f.name);if(f.isDirectory())out.push(...await walk(p));else if(!['sw.js','asset-manifest.json'].includes(f.name))out.push(p.replaceAll('\\','/').replace(/^dist\//,''));}return out;}
-const assets=await walk('dist'),digest=createHash('sha256');for(const a of assets)digest.update(await readFile(`dist/${a}`));const version=digest.digest('hex').slice(0,12);
-await writeFile('dist/asset-manifest.json',JSON.stringify({version,assets},null,2));
-await writeFile('dist/sw.js',`const NAME='salarybook-'+${JSON.stringify(version)}+'-'+new URL(self.registration.scope).pathname;const ASSETS=${JSON.stringify(assets)};self.addEventListener('install',e=>e.waitUntil((async()=>{const c=await caches.open(NAME);await c.addAll(ASSETS.map(x=>new URL(x,self.registration.scope).href));await self.skipWaiting();})()));self.addEventListener('message',e=>{if(e.data?.type==='OFFLINE_STATUS'&&e.ports[0])e.waitUntil((async()=>{const c=await caches.open(NAME);const cachedCount=(await c.keys()).length;e.ports[0].postMessage({type:'OFFLINE_STATUS',cachedCount,total:ASSETS.length,ready:cachedCount>=ASSETS.length});})());});self.addEventListener('activate',e=>e.waitUntil((async()=>{for(const k of await caches.keys())if(k.startsWith('salarybook-')&&k.endsWith('-'+new URL(self.registration.scope).pathname)&&k!==NAME)await caches.delete(k);await self.clients.claim();for(const client of await self.clients.matchAll())client.postMessage({type:'OFFLINE_READY',cachedCount:ASSETS.length,total:ASSETS.length,ready:true});})()));self.addEventListener('fetch',e=>{const u=new URL(e.request.url);if(e.request.method!=='GET'||u.origin!==location.origin||!u.href.startsWith(self.registration.scope))return;e.respondWith((async()=>{const c=await caches.open(NAME);const key=new URL(u.pathname,location.origin).href;const hit=await c.match(key);if(hit)return hit;try{return await fetch(e.request);}catch(error){if(e.request.mode==='navigate')return await c.match(new URL('index.html',self.registration.scope).href);throw error;}})());});`);
-console.log(`Built ${assets.length} offline assets, version ${version}. No external runtime requests.`);
+import {pathToFileURL} from 'node:url';
+
+const root=process.cwd(),dist=path.resolve(root,'dist');
+if(!dist.startsWith(root+path.sep))throw new Error('Refusing to write build outside the project directory.');
+await rm(dist,{recursive:true,force:true});await mkdir(dist,{recursive:true});
+const hashBytes=bytes=>createHash('sha256').update(bytes).digest('hex');
+const hashText=text=>hashBytes(Buffer.from(text));
+const sourceFiles=['index.html','style.css','manifest.webmanifest','icon.svg','package.json','scripts/build.mjs'];
+async function walk(dir,base=dir){let out=[];for(const entry of await readdir(dir,{withFileTypes:true})){if(entry.name==='.git'||entry.name==='node_modules'||entry.name==='dist')continue;const filename=path.join(dir,entry.name);if(entry.isDirectory())out.push(...await walk(filename,base));else out.push(path.relative(base,filename).replaceAll('\\','/'));}return out;}
+const sourcePaths=[...(await walk('src')).map(p=>`src/${p}`),...(await walk('icons')).map(p=>`icons/${p}`)];
+const buildInputs=[];for(const file of [...sourceFiles,...sourcePaths])buildInputs.push(file,await readFile(file));
+const buildId=createHash('sha256').update(buildInputs.map((item,i)=>i%2===0?Buffer.from(item+'\0'):item).reduce((a,b)=>Buffer.concat([a,b]),Buffer.alloc(0))).digest('hex').slice(0,16);
+const release=`releases/${buildId}`;
+
+let html=await readFile('index.html','utf8');
+html=html.replace('./src/app-v1.2.js',`./${release}/src/app.js`);
+await writeFile(path.join(dist,'index.html'),html);
+for(const f of ['style.css','manifest.webmanifest','icon.svg'])await copyFile(f,path.join(dist,f));
+await cp('icons',path.join(dist,'icons'),{recursive:true});
+await mkdir(path.join(dist,release,'src'),{recursive:true});
+await cp('src',path.join(dist,release,'src'),{recursive:true});
+await writeFile(path.join(dist,release,'src/build-meta.js'),`export const BUILD_META=${JSON.stringify({appVersion:'1.2.1-ocr-candidate',buildId,ocrEngine:'Tesseract.js 6.0.1',resourceVersion:'sha256-content'})};\n`);
+await mkdir(path.join(dist,'vendor/tesseract'),{recursive:true});await mkdir(path.join(dist,'vendor/core'),{recursive:true});await mkdir(path.join(dist,'vendor/lang'),{recursive:true});await mkdir(path.join(dist,'vendor/pdf'),{recursive:true});
+for(const file of ['tesseract.min.js','worker.min.js'])await copyFile(path.join('node_modules/tesseract.js/dist',file),path.join(dist,'vendor/tesseract',file));
+const coreFiles=(await readdir('node_modules/tesseract.js-core')).filter(f=>/^tesseract-core(?:-simd)?(?:-lstm)?\.wasm(?:\.js)?$/.test(f));
+for(const file of coreFiles)await copyFile(path.join('node_modules/tesseract.js-core',file),path.join(dist,'vendor/core',file));
+for(const language of ['eng','chi_tra'])await copyFile(path.join(`node_modules/@tesseract.js-data/${language}/4.0.0`,`${language}.traineddata.gz`),path.join(dist,'vendor/lang',`${language}.traineddata.gz`));
+for(const file of ['pdf.mjs','pdf.worker.mjs'])await copyFile(path.join('node_modules/pdfjs-dist/build',file),path.join(dist,'vendor/pdf',file));
+for(const directory of ['cmaps','standard_fonts'])await cp(path.join('node_modules/pdfjs-dist',directory),path.join(dist,'vendor/pdf',directory),{recursive:true});
+await mkdir(path.join(dist,'licenses'),{recursive:true});
+for(const [pkg,target] of [['tesseract.js','tesseract'],['tesseract.js-core','tesseract-core'],['pdfjs-dist','pdfjs']]){const files=await readdir(path.join('node_modules',pkg));const license=files.find(f=>/^LICENSE/i.test(f));if(license)await copyFile(path.join('node_modules',pkg,license),path.join(dist,'licenses',`${target}.txt`));}
+await writeFile(path.join(dist,'licenses/models.txt'),'Tesseract traineddata: Apache-2.0. https://github.com/tesseract-ocr/tessdata https://github.com/naptha/tessdata');
+await writeFile(path.join(dist,'.nojekyll'),'');
+
+const baseAssets=['index.html','style.css','manifest.webmanifest','icon.svg','sw.js','asset-manifest.json',...sourcePaths.map(p=>`${release}/${p.replace(/^src\//,'src/').replace(/^icons\//,'icons/')}`),'vendor/tesseract/tesseract.min.js','vendor/tesseract/worker.min.js',...(await walk(path.join(dist,'icons'))).map(p=>`icons/${p.split(/[\\/]/).slice(-1)[0]}`)];
+const shellAssets=[...new Set(baseAssets.filter(p=>p!=='sw.js'&&p!=='asset-manifest.json'))];
+const files=[];for(const filename of shellAssets){const full=path.join(dist,filename);try{const bytes=await readFile(full);files.push({path:filename,bytes:bytes.length,sha256:hashBytes(bytes)});}catch{}}
+const vendorAsset=async(relative)=>{const full=path.join(dist,relative);const bytes=await readFile(full);return {path:relative,bytes:bytes.length,sha256:hashBytes(bytes)};};
+const commonAssets=await Promise.all(coreFiles.map(f=>vendorAsset(`vendor/core/${f}`)));
+const fixedAssets=[await vendorAsset('vendor/lang/eng.traineddata.gz')];
+const genericAssets=[await vendorAsset('vendor/lang/eng.traineddata.gz'),await vendorAsset('vendor/lang/chi_tra.traineddata.gz')];
+const pdfFiles=[];for(const p of await walk(path.join(dist,'vendor/pdf')))pdfFiles.push((await vendorAsset(`vendor/pdf/${p}`)));
+const groupHash=assets=>hashText(assets.map(x=>x.path+':'+x.sha256).sort().join('\n')).slice(0,20);
+const groups={common:{hash:groupHash(commonAssets),assets:commonAssets},fixed:{hash:groupHash(fixedAssets),assets:fixedAssets},generic:{hash:groupHash(genericAssets),assets:genericAssets},pdf:{hash:groupHash(pdfFiles),assets:pdfFiles}};
+const shellHash=groupHash(files);
+const manifest={buildId,appVersion:'1.2.1-ocr-candidate',shell:{hash:shellHash,assets:files},groups};
+await writeFile(path.join(dist,'asset-manifest.json'),JSON.stringify(manifest,null,2));
+
+const config=JSON.stringify({buildId,shellHash,shellAssets:files,groups,scopeSuffix:new URL('https://local.invalid/').pathname});
+const sw=`const CONFIG=${config};\nconst SCOPE=new URL(self.registration.scope).pathname;\nconst SHELL_CACHE='salarybook-shell-'+CONFIG.buildId+'-'+SCOPE;\nconst resourceCache=(name)=>'salarybook-resource-'+name+'-'+CONFIG.groups[name].hash+'-'+SCOPE;\nconst shellUrl=(p)=>new URL(p,self.registration.scope).href;\nconst digest=async(response)=>{const bytes=await response.clone().arrayBuffer();const sum=await crypto.subtle.digest('SHA-256',bytes);return [...new Uint8Array(sum)].map(x=>x.toString(16).padStart(2,'0')).join('');};\nconst send=(port,data)=>{try{port?.postMessage(data);}catch{}};\nasync function checkedFetch(asset){const response=await fetch(shellUrl(asset.path),{cache:'no-store'});if(!response.ok)throw Error('FETCH_FAILED');if(await digest(response)!==asset.sha256)throw Error('HASH_MISMATCH');return response;}\nasync function installShell(){const cache=await caches.open(SHELL_CACHE);let done=0;for(const asset of CONFIG.shellAssets){await cache.put(shellUrl(asset.path),await checkedFetch(asset));done++;}await cache.put(shellUrl('.shell-ready'),new Response(JSON.stringify({buildId:CONFIG.buildId,hash:CONFIG.shellHash,count:done})));}\nasync function cacheReady(name){const cache=await caches.open(resourceCache(name));const marker=await cache.match(shellUrl('.ready'));if(!marker)return false;let data;try{data=await marker.json();}catch{return false;}const expected=CONFIG.groups[name];if(data.hash!==expected.hash||data.count!==expected.assets.length)return false;for(const item of expected.assets)if(!await cache.match(shellUrl(item.path)))return false;return true;}\nasync function installGroup(name,port,force=false,offset=0,total=1){const cacheName=resourceCache(name);if(force)await caches.delete(cacheName);const cache=await caches.open(cacheName);const assets=CONFIG.groups[name].assets;if(!force&&await cacheReady(name)){send(port,{type:'RESOURCE_PROGRESS',progress:Math.min(1,offset+1/total),message:'資源已備妥。'});return;}let done=0;for(const asset of assets){const url=shellUrl(asset.path);let response=await cache.match(url);if(!

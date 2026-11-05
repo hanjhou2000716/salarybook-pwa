@@ -7,3 +7,6 @@ export async function save(r){await tx(['records','images'],'readwrite',t=>{cons
 export async function remove(id){await tx(['records','images'],'readwrite',t=>{t.objectStore('records').delete(id);t.objectStore('images').delete(id);});}
 export async function restore(records,replace){await tx(['records','images'],'readwrite',t=>{if(replace){t.objectStore('records').clear();t.objectStore('images').clear();}for(const r of records){const {sources,...record}=r;t.objectStore('records').put(record);t.objectStore('images').put({id:r.id,sources});}});}
 export async function setting(id,value){return tx(['settings'],value===undefined?'readonly':'readwrite',t=>{const s=t.objectStore('settings');if(value!==undefined){s.put({id,value});return value;}const q=s.get(id);return ()=>q.result?.value;});}
+export const saveOcrCheckpoint=value=>setting('ocr-draft-v1',value);
+export const loadOcrCheckpoint=()=>setting('ocr-draft-v1');
+export const clearOcrCheckpoint=()=>tx(['settings'],'readwrite',t=>t.objectStore('settings').delete('ocr-draft-v1'));

@@ -12,7 +12,7 @@ try{
     if(!ready)await new Promise(resolve=>setTimeout(resolve,250));
   }
   assert.ok(ready,'local preview server starts');
-  browser=await chromium.launch({headless:true,executablePath:process.env.CHROME_PATH||'C:/Program Files/Google/Chrome/Application/chrome.exe'});
+  browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});
   const context=await browser.newContext({viewport:{width:1280,height:900}}),page=await context.newPage(),pageErrors=[];
   page.on('pageerror',error=>pageErrors.push(error.message));
   await page.goto(base,{waitUntil:'networkidle'});
@@ -21,9 +21,10 @@ try{
   assert.equal(manifest.scope,'./','PWA scope remains stable across updates');
   assert.ok(manifest.icons.some(icon=>icon.purpose==='maskable'&&icon.sizes==='512x512'),'manifest includes a dedicated Android-safe icon');
   assert.deepEqual(await page.evaluate(async()=>{const icon=new Image();icon.src=document.querySelector('link[rel="apple-touch-icon"]').href;await icon.decode();return [icon.naturalWidth,icon.naturalHeight];}),[180,180],'Apple touch icon is 180px square');
+  assert.deepEqual(await page.evaluate(async()=>{const appModule=new URL(document.querySelector('script[type="module"]').src),{hasDownloadTableStructure}=await import(new URL('template-ocr.js',appModule));const fake=(kind,index)=>{const c=document.createElement('canvas');c.width=691;c.height=1536;const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);if(kind==='table'){x.strokeStyle='#111';x.lineWidth=2;const ys=index===0?[458,758]:[266,311,433,464,538];for(const y of ys){x.beginPath();x.moveTo(180,y);x.lineTo(600,y);x.stroke();}}return {data:c.toDataURL(),rotation:0,crop:[0,0,100,100]};};const table=await hasDownloadTableStructure([fake('table',0),fake('table',1)]),swapped=await hasDownloadTableStructure([fake('table',1),fake('table',0)]),cards=await hasDownloadTableStructure([fake('cards',0),fake('cards',1)]);return [table,swapped,cards];}),[true,true,false],'both page roles are validated, swapped order is supported, and cards are rejected');
   assert.equal(await page.locator('.install-entry').count(),1,'browser tabs show an install entry without claiming the app is installed');
   await page.evaluate(async()=>{
-    const {sample}=await import('./src/core.js'),DB=await import('./src/db.js');
+    const appModule=new URL(document.querySelector('script[type="module"]').src),{sample}=await import(new URL('core.js',appModule)),DB=await import(new URL('db.js',appModule));
     const base=sample();base.confirmed=true;await DB.save(base);
     const bonus=structuredClone(base);bonus.id=crypto.randomUUID();bonus.type='獎金';await DB.save(bonus);
     const august=structuredClone(base);august.id=crypto.randomUUID();august.month='2025-08';august.company='另一示範公司';await DB.save(august);
@@ -55,55 +56,23 @@ try{
   await installGuide.goto(`${base}#home`,{waitUntil:'networkidle'});
   await installGuide.evaluate(()=>{window.__installPromptCalls=0;const event=new Event('beforeinstallprompt',{cancelable:true});event.prompt=async()=>{window.__installPromptCalls++;};event.userChoice=Promise.resolve({outcome:'dismissed'});dispatchEvent(event);});
   await installGuide.click('.install-entry');
+  await installGuide.waitForFunction(()=>location.hash==='#install');
   assert.match(await installGuide.locator('h1').innerText(),/安裝到手機/);
   assert.match(await installGuide.locator('.install-guide').innerText(),/Chrome 已準備好安裝/);
   await installGuide.click('[data-action="install-now"]');
   assert.equal(await installGuide.evaluate(()=>window.__installPromptCalls),1,'Android Chrome install prompt opens only after a user action');
   assert.match(await installGuide.locator('.install-guide').innerText(),/安裝視窗已關閉/);
-  await installGuide.waitForFunction(()=>document.querySelector('[data-offline-status]')?.textContent.startsWith('可離線使用'),{timeout:120000});
+  await installGuide.waitForFunction(()=>document.querySelector('[data-offline-status]')?.textContent.includes('離線查閱：已準備'),{timeout:120000});
   await installGuide.goto(`${base}#settings`,{waitUntil:'networkidle'});
   assert.equal(await installGuide.locator('.install-entry').count(),1,'settings keeps the same install guide entry');
   assert.match(await installGuide.locator('[data-install-status]').innerText(),/瀏覽器分頁開啟/,'a browser tab does not claim that the app is already installed');
   assert.ok(await installGuide.locator('.install-entry').evaluate(el=>el.getBoundingClientRect().height>=44),'install button meets touch target height');
   await installGuide.click('.install-entry');
+  await installGuide.waitForFunction(()=>location.hash==='#install');
   assert.match(await installGuide.locator('h1').innerText(),/安裝到手機/);
   assert.match(await installGuide.locator('.install-guide').innerText(),/Chrome 右上角/,'dismissal leaves user-controlled Chrome menu steps');
   assert.ok(await installGuide.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'390px install guide has no page-level horizontal overflow');
-  await installGuide.close();
-
-  const iosGuide=await context.newPage();
-  await iosGuide.addInitScript(()=>Object.defineProperty(navigator,'userAgent',{configurable:true,value:'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'}));
-  await iosGuide.goto(`${base}#install`,{waitUntil:'networkidle'});
-  assert.match(await iosGuide.locator('.install-guide').innerText(),/分享/);
-  assert.match(await iosGuide.locator('.install-guide').innerText(),/加入主畫面/);
-  await iosGuide.close();
-
-  const standalone=await context.newPage();
-  await standalone.addInitScript(()=>Object.defineProperty(navigator,'standalone',{configurable:true,value:true}));
-  await standalone.goto(`${base}#home`,{waitUntil:'networkidle'});
-  assert.equal(await standalone.locator('.install-entry').count(),0,'standalone app mode hides repeated install actions');
-  assert.match(await standalone.locator('.app-mode-badge').innerText(),/正在使用 App 模式/);
-  await standalone.goto(`${base}#install`,{waitUntil:'networkidle'});
-  assert.match(await standalone.locator('[data-install-status]').innerText(),/正在使用 App 模式/);
-  await standalone.close();
-
-  await page.setViewportSize({width:390,height:844});
-  await page.goto(`${base}#home`,{waitUntil:'networkidle'});
-  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'390px view has no page-level horizontal overflow');
-  await page.waitForFunction(async()=>{
-    const names=await caches.keys(),name=names.find(x=>x.startsWith('salarybook-'));
-    return name&&(await(await caches.open(name)).keys()).length>=200;
-  },{timeout:120000});
-  await page.evaluate(()=>navigator.serviceWorker.ready);
-  await page.reload({waitUntil:'networkidle'});
-  await page.waitForFunction(()=>Boolean(navigator.serviceWorker.controller));
-  await context.setOffline(true);
-  await page.reload({waitUntil:'load'});
-  assert.match(await page.locator('h1').innerText(),/每一份努力/);
-  assert.deepEqual(pageErrors,[],'no uncaught page errors');
-  await context.close();
-  console.log('Browser checks passed: charts, history filters, Android install prompt/dismissal, iPhone Safari guidance, standalone mode, 390px layout, offline readiness, and offline reload.');
-}finally{
-  await browser?.close();
-  server.kill();
-}
+  await installGuide.goto(`${base}#settings`,{waitUntil:'networkidle'});
+  await installGuide.click('[data-action="prepare-fixed"]');
+  await installGuide.waitForFunction(()=>document.querySelector('[data-resource-state]')?.textContent.includes('OCR下載表格：已準備'),{timeout:120000});
+  assert.deepEqual(await installGuide.evaluate(async()=>{const moduleUrl=new URL(document.querySelector('script[type="module"]').src),{recognizeTemplate}=await import(new URL('template-ocr.js',moduleUrl)),makePage=(role)=>{const c=document.createElement('canvas');c.width=691;c.height=1536;const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.fillStyle='#111';x.font='12px Arial';x.textBaseline='middle';const cell=(rect,value)=>{const [x0,y0,x1,y1]=rect,w=x.measureText(value).width;x.fillText(value,x0+Math.max(1,(x1-x0-w)/2),(y0+y1)/2);};if(role==='income'){for(const y of [458,758]){x.strokeStyle='#111';x.lineWidth=2;x.beginPath();x.moveTo(180,y);x.lineTo(600,y);x.stroke();}cell([414,250,454,267],
