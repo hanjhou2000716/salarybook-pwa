@@ -56,7 +56,7 @@ try{
   await installGuide.goto(`${base}#home`,{waitUntil:'networkidle'});
   await installGuide.evaluate(()=>{window.__installPromptCalls=0;const event=new Event('beforeinstallprompt',{cancelable:true});event.prompt=async()=>{window.__installPromptCalls++;};event.userChoice=Promise.resolve({outcome:'dismissed'});dispatchEvent(event);});
   await installGuide.click('.install-entry');
-  await installGuide.waitForFunction(()=>location.hash==='#install');
+  await installGuide.waitForFunction(()=>location.hash==='#install'&&document.querySelector('h1')?.innerText.includes('安裝到手機'));
   assert.match(await installGuide.locator('h1').innerText(),/安裝到手機/);
   assert.match(await installGuide.locator('.install-guide').innerText(),/Chrome 已準備好安裝/);
   await installGuide.click('[data-action="install-now"]');
@@ -68,7 +68,7 @@ try{
   assert.match(await installGuide.locator('[data-install-status]').innerText(),/瀏覽器分頁開啟/,'a browser tab does not claim that the app is already installed');
   assert.ok(await installGuide.locator('.install-entry').evaluate(el=>el.getBoundingClientRect().height>=44),'install button meets touch target height');
   await installGuide.click('.install-entry');
-  await installGuide.waitForFunction(()=>location.hash==='#install');
+  await installGuide.waitForFunction(()=>location.hash==='#install'&&document.querySelector('h1')?.innerText.includes('安裝到手機'));
   assert.match(await installGuide.locator('h1').innerText(),/安裝到手機/);
   assert.match(await installGuide.locator('.install-guide').innerText(),/Chrome 右上角/,'dismissal leaves user-controlled Chrome menu steps');
   assert.ok(await installGuide.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'390px install guide has no page-level horizontal overflow');
