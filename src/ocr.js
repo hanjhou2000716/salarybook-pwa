@@ -67,4 +67,43 @@ export function parseOCR(results,{job}={}) {
       Object.assign(item,{value:found.value,ocrValue:found.value,state:accepted.confidence<60?'unknown':'value',ocrStatus:accepted.confidence<60?'LOW_CONFIDENCE':'PARSED',sourcePage:accepted.page,confidence:accepted.confidence,ocrReason:null});
     }
     for(const [key,names] of Object.entries(TOTAL_ALIASES)){
-      const found=extractAfterLabel
+      const found=extractAfterLabel(text,names);if(job)traceField(job,{group:'totals',name:key,page:res.sourcePage||index+1,pageId:res.pageId,raw:found.raw,normalized:found.normalized,value:found.value,confidence:res.confidence,status:found.status,reason:found.reason});
+      const id=fieldKey('totals',key),prior=r.ocrMeta.fields[id];
+      if(found.value!==null){if(prior?.ocrValue!==null&&prior?.ocrValue!==undefined&&prior.ocrValue!==found.value)r.ocrMeta.fields[id]={...prior,status:'ambiguous',reason:'CONFLICTING_READS'};else{r.totals[key]=found.value;r.ocrMeta.fields[id]={status:(res.confidence??0)<60?'needsReview':'parsed',page:prior?.page||res.sourcePage||index+1,pageId:prior?.pageId||res.pageId||null,confidence:Math.max(prior?.confidence||0,res.confidence??0),reason:null,ocrValue:found.value};}}else if(!prior)r.ocrMeta.fields[id]={status:found.status,page:res.sourcePage||index+1,pageId:res.pageId||null,confidence:res.confidence??0,reason:found.reason,ocrValue:null};
+    }
+  }
+  r.ocr=results.map((x,i)=>({page:x.sourcePage||i+1,text:x.text||'',confidence:x.confidence??0}));
+  r.notes='本機 OCR 草稿：請核對所有明細、稅別及未辨識欄位。';return r;
+}
+
+export async function recognize(pages,onProgress=()=>{},options={}) {
+  const {signal,job}=options;abortError(signal);if(!globalThis.Tesseract)throw Object.assign(Error('本機 OCR 引擎未載入，請檢查部署檔案'),{code:'ENGINE_MISSING'});
+  const started=performance.now();let worker,cancelPending=false;const results=[];let current=0;
+  const workerPromise=Tesseract.createWorker(['chi_tra','eng'],1,{workerPath:new URL('vendor/tesseract/worker.min.js',base).href,corePath:new URL('vendor/core/',base).href,langPath:new URL('vendor/lang',base).href,cacheMethod:'none',logger:m=>onProgress(`引擎準備／第 ${current+1} 頁：${m.status}`,Math.min(.25,Math.max(0,m.progress||0)*.25))});
+  workerPromise.then(w=>{if(signal?.aborted||cancelPending)w.terminate();}).catch(()=>{});
+  try{
+    worker=await runWithCancel(workerPromise,60000,'ENGINE_INIT_TIMEOUT',signal,()=>worker);abortError(signal);await runWithCancel(worker.setParameters({preserve_interword_spaces:'1'}),15000,'PARAMETERS_TIMEOUT',signal,()=>worker);
+    for(current=0;current<pages.length;current++){
+      abortError(signal);if(performance.now()-started>300000)throw Object.assign(Error('OCR 工作超過 5 分鐘，已停止。'),{code:'JOB_TIMEOUT'});
+      const canvas=await transform(pages[current],true);const result=await runWithCancel(worker.recognize(canvas.toDataURL('image/png'),{},{text:true,blocks:true}),15000,'PAGE_TIMEOUT',signal,()=>worker);canvas.remove();
+      results.push({text:result.data.text,confidence:result.data.confidence,sourcePage:pages[current].originalPage||current+1,pageId:pages[current].pageId});onProgress(`第 ${current+1} 頁辨識完成`,.25+.65*(current+1)/pages.length);
+    }
+    const r=parseOCR(results,{job});r.sources=await Promise.all(pages.map(async(p,i)=>({name:p.name,page:i+1,data:(await transform(p)).toDataURL('image/png'),hash:p.hash})));onProgress('欄位配對與校驗',.98);onProgress('辨識完成',1);return r;
+  }catch(error){if(!worker)cancelPending=true;if(error.code==='PAGE_TIMEOUT'||error.code==='ENGINE_INIT_TIMEOUT'||error.code==='PARAMETERS_TIMEOUT'||error.code==='JOB_TIMEOUT')error.message='OCR 已逾時（'+error.code+'），圖片仍保留，可重新嘗試。';throw error;}
+  finally{if(worker){try{await worker.terminate();}catch{}}}
+}
+
+export async function selfTest({signal,onProgress=()=>{}}={}) {
+  if(!globalThis.Tesseract)throw Object.assign(Error('OCR 引擎程式未載入'),{code:'ENGINE_MISSING'});
+  let worker,input,canvas,initCancelled=false;const started=performance.now();onProgress('準備本機 OCR 引擎',.05);
+  try{
+    const promise=Tesseract.createWorker('eng',1,{workerPath:new URL('vendor/tesseract/worker.min.js',base).href,corePath:new URL('vendor/core/',base).href,langPath:new URL('vendor/lang',base).href,cacheMethod:'none'});promise.then(w=>{if(signal?.aborted||initCancelled)w.terminate();}).catch(()=>{});worker=await runWithCancel(promise,60000,'ENGINE_INIT_TIMEOUT',signal,()=>worker);abortError(signal);
+    canvas=document.createElement('canvas');canvas.width=720;canvas.height=180;const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,720,180);ctx.fillStyle='#000';ctx.font='bold 104px Arial';ctx.fillText('43872',36,128);
+    onProgress('辨識虛構測試圖',.4);const result=await runWithCancel(worker.recognize(canvas),15000,'PAGE_TIMEOUT',signal,()=>worker);abortError(signal);
+    const parsed=normalizeNumericCell(result.data.text);input=document.createElement('input');input.type='number';input.value=parsed.value??'';const passed=parsed.status==='parsed'&&parsed.value===43872&&input.value==='43872';
+    onProgress('檢查欄位填值',.9);return {passed,stage:passed?'complete':'mapping',durationMs:Math.round(performance.now()-started),recognizedCharacters:String(result.data.text||'').length};
+  }catch(error){if(!worker)initCancelled=true;return {passed:false,stage:error.code||'ocr',durationMs:Math.round(performance.now()-started),errorCode:error.code||'OCR_FAILED'};}
+  finally{if(worker){try{await worker.terminate();}catch{}}canvas?.remove();input?.remove();}
+}
+
+export {normalizeNumericCell,fieldKey};
