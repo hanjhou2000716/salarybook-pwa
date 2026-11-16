@@ -1,5 +1,5 @@
 import {blankRecord} from './core.js';
-import {fieldKey, normalizeNumericCell, traceField} from './ocr-diagnostics.js';
+import {fieldKey, normalizeNumericCell, traceField, extractAmountAfterLabel, selectOcrCandidate} from './ocr-diagnostics.js';
 import {assetRoot, abortError, runWithCancel} from './runtime.js';
 
 const base = assetRoot(import.meta.url);
@@ -36,40 +36,54 @@ export async function hash(s){return [...new Uint8Array(await crypto.subtle.dige
 export function loadImage(src){return new Promise((resolve,reject)=>{const i=new Image();i.onload=()=>resolve(i);i.onerror=()=>reject(Error('圖片格式損毀'));i.src=src;});}
 export async function transform(p,upscale=false){const img=await loadImage(p.original||p.data),[x,y,w,h]=p.crop||[0,0,100,100],sw=img.width*w/100,sh=img.height*h/100;if(sw<20||sh<20)throw Error('裁切範圍過小');const rot=(p.rotation||0)%360,c=document.createElement('canvas'),scale=upscale?Math.min(3,2600/Math.max(sw,sh)):1;c.width=Math.round((rot%180?sh:sw)*scale);c.height=Math.round((rot%180?sw:sh)*scale);const ctx=c.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,c.width,c.height);ctx.translate(c.width/2,c.height/2);ctx.rotate(rot*Math.PI/180);ctx.drawImage(img,img.width*x/100,img.height*y/100,sw,sh,-sw*scale/2,-sh*scale/2,sw*scale,sh*scale);return c;}
 
-function extractAfterLabel(text,names,{allowDecimal=false}={}) {
-  const lines=String(text||'').normalize('NFKC').replace(HIDDEN,'').split(/\r?\n/);
-  for(const line of lines){
-    const clean=line.replace(/[＊*]/g,'');
-    for(const name of names){const at=clean.indexOf(name);if(at<0)continue;const tail=clean.slice(at+name.length).replace(/^\s*[（(][^）)]*[）)]/,'').replace(/^\s*[:：=]?\s*/, '');
-      const match=tail.match(/^([$＄]?\s*\d[\d,，.]*\s*(?:元)?)/);if(!match)continue;
-      const result=normalizeNumericCell(match[1],{allowDecimal});if(result.status==='parsed')return result;
-      return result;
-    }
+export function flattenOcrLines(blocks) {
+  const rows=[];
+  for(const block of blocks||[])for(const paragraph of block?.paragraphs||[])for(const line of paragraph?.lines||[]){
+    const words=line.words||[];
+    const text=String(line.text||words.map(word=>word.text||'').join('')).trim();
+    if(text)rows.push({text,bbox:line.bbox||null,confidence:Number(line.confidence??paragraph.confidence??block.confidence)||0,
+      words:words.map(word=>({text:String(word.text||''),bbox:word.bbox||null,confidence:Number(word.confidence)||0}))});
   }
-  return {raw:'',normalized:'',value:null,status:'empty',reason:'NO_TEXT'};
+  return rows;
 }
 function monthFrom(text){const s=String(text||'').normalize('NFKC').replace(HIDDEN,'');const m=s.match(/(20\d{2})\s*[年\-/]?\s*(0?[1-9]|1[0-2])\s*月?/)||s.match(/所得年月\s*[:：]?\s*(20\d{2})\s*(0[1-9]|1[0-2])/);return m?`${m[1]}-${String(m[2]).padStart(2,'0')}`:'';}
 export function parseOCR(results,{job}={}) {
-  const r=blankRecord();r.ocrMeta={fields:{}};for(const item of r.items.filter(i=>i.group==='income'||i.group==='deductions')){item.state='unknown';item.ocrStatus='UNREAD';}const collected=new Map();
+  const r=blankRecord();r.ocrMeta={fields:{}};
+  for(const item of r.items.filter(i=>i.group==='income'||i.group==='deductions')){item.state='unknown';item.ocrStatus='UNREAD';}
+  const collected=new Map();
   for(const [index,res] of results.entries()){
-    const text=res.text||'',detectedMonth=monthFrom(text);if(job)traceField(job,{group:'basic',name:'month',page:res.sourcePage||index+1,pageId:res.pageId,raw:detectedMonth,normalized:detectedMonth,value:detectedMonth?Number(detectedMonth.replace('-','')):null,confidence:res.confidence,status:detectedMonth?'parsed':'empty',reason:detectedMonth?null:'NO_TEXT'});if(!r.month)r.month=detectedMonth;
-    const normalizedText=text.normalize('NFKC').replace(HIDDEN,'');
-    const deductionPage=/扣減項目|扣款明細|合計應扣/.test(normalizedText);
+    const text=res.text||'',page=res.sourcePage||index+1,detectedMonth=monthFrom(text);
+    if(job)traceField(job,{group:'basic',name:'month',page,pageId:res.pageId,raw:detectedMonth,normalized:detectedMonth,value:detectedMonth?Number(detectedMonth.replace('-','')):null,confidence:res.confidence,status:detectedMonth?'parsed':'empty',reason:detectedMonth?null:'NO_TEXT'});
+    if(!r.month)r.month=detectedMonth;
+    const lines=res.lines?.length?res.lines:String(text||'').split(/\r?\n/).map(line=>({text:line,bbox:null,confidence:res.confidence??0}));
+    const normalizedText=text.normalize('NFKC').replace(HIDDEN,''),deductionPage=/扣減項目|扣款明細|合計應扣/.test(normalizedText);
     for(const group of ['income','deductions'])for(const item of r.items.filter(i=>i.group===group)){
       if(group==='income'&&deductionPage)continue;
       if(group==='deductions'&&!deductionPage&&results.length>1)continue;
-      const found=extractAfterLabel(text,ALIASES[item.name]||[item.name]);
-      if(job)traceField(job,{group,name:item.name,page:res.sourcePage||index+1,pageId:res.pageId,raw:found.raw,normalized:found.normalized,value:found.value,confidence:res.confidence,status:found.status,reason:found.reason});
-      const key=fieldKey(group,item.name),prior=collected.get(key);
-      if(found.value===null){item.state='unknown';if(prior){item.value=prior.value;item.ocrValue=prior.value;item.ocrStatus=found.status==='empty'?(item.ocrStatus||'LOW_CONFIDENCE'):found.status==='ambiguous'?'AMBIGUOUS':'LOW_CONFIDENCE';item.ocrReason=found.reason||null;item.sourcePage=prior.page;item.confidence=prior.confidence;}else{item.ocrStatus=found.status==='empty'?'UNREAD':found.status.toUpperCase();item.sourcePage=res.sourcePage||index+1;item.confidence=res.confidence??0;}continue;}
-      if(prior&&prior.value!==found.value){const current={value:found.value,confidence:res.confidence||0,page:res.sourcePage||index+1};const selected=current.confidence>prior.confidence?current:prior;collected.set(key,selected);Object.assign(item,{value:selected.value,ocrValue:selected.value,state:'unknown',ocrStatus:'AMBIGUOUS',ocrReason:'CONFLICTING_READS',sourcePage:selected.page,confidence:selected.confidence});continue;}
-      const accepted={value:found.value,confidence:Math.max(prior?.confidence||0,res.confidence||0),page:prior?.page||res.sourcePage||index+1};collected.set(key,accepted);
-      Object.assign(item,{value:found.value,ocrValue:found.value,state:accepted.confidence<60?'unknown':'value',ocrStatus:accepted.confidence<60?'LOW_CONFIDENCE':'PARSED',sourcePage:accepted.page,confidence:accepted.confidence,ocrReason:null});
+      const found=extractAmountAfterLabel(lines,ALIASES[item.name]||[item.name]);
+      const line=found.sourceRect?lines.find(candidate=>candidate.bbox===found.sourceRect):null,confidence=Number(line?.confidence)||Number(res.confidence)||0;
+      const rect=found.sourceRect?[found.sourceRect.x0,found.sourceRect.y0,found.sourceRect.x1,found.sourceRect.y1]:null;
+      if(job)traceField(job,{group,name:item.name,page,pageId:res.pageId,rect,raw:found.raw,normalized:found.normalized,value:found.value,confidence,status:found.status,reason:found.reason});
+      const id=fieldKey(group,item.name),prior=collected.get(id);
+      if(found.value===null){
+        if(prior){const selected=prior.selected,source=prior.attempts.find(attempt=>attempt.page===selected.page);Object.assign(item,{value:selected.value,ocrValue:selected.value,ocrCandidates:selected.candidates,state:'unknown',ocrStatus:selected.status==='ambiguous'?'AMBIGUOUS':'NEEDS_REVIEW',ocrReason:selected.reason,sourcePage:selected.page,sourcePageId:source?.pageId||null,sourceRect:source?.sourceRect||null,confidence:selected.confidence});}
+        else{item.state='unknown';item.ocrStatus=found.status==='empty'?'UNREAD':found.status.toUpperCase();item.sourcePage=page;item.confidence=res.confidence??0;}
+        continue;
+      }
+      const attempts=[...(prior?.attempts||[]),{value:found.value,status:'parsed',confidence,page,pageId:res.pageId,sourceRect:found.sourceRect,raw:found.raw}];
+      const selected=selectOcrCandidate(attempts),source=attempts.find(attempt=>attempt.page===selected.page),status=selected.status==='ambiguous'?'AMBIGUOUS':selected.autoTrusted?'PARSED':'NEEDS_REVIEW';
+      collected.set(id,{attempts,selected});
+      Object.assign(item,{value:selected.value,ocrValue:selected.value,ocrCandidates:selected.candidates,state:selected.autoTrusted?'value':'unknown',ocrStatus:status,ocrReason:selected.reason,sourcePage:selected.page,sourcePageId:source?.pageId||null,sourceRect:source?.sourceRect||null,confidence:selected.confidence});
+      r.ocrMeta.fields[id]={status:selected.status,page:selected.page,pageId:source?.pageId||null,sourceRect:source?.sourceRect||null,confidence:selected.confidence,reason:selected.reason,ocrValue:selected.value,candidates:selected.candidates,attempts};
     }
     for(const [key,names] of Object.entries(TOTAL_ALIASES)){
-      const found=extractAfterLabel(text,names);if(job)traceField(job,{group:'totals',name:key,page:res.sourcePage||index+1,pageId:res.pageId,raw:found.raw,normalized:found.normalized,value:found.value,confidence:res.confidence,status:found.status,reason:found.reason});
+      const found=extractAmountAfterLabel(lines,names),line=found.sourceRect?lines.find(candidate=>candidate.bbox===found.sourceRect):null,confidence=Number(line?.confidence)||Number(res.confidence)||0,rect=found.sourceRect?[found.sourceRect.x0,found.sourceRect.y0,found.sourceRect.x1,found.sourceRect.y1]:null;
+      if(job)traceField(job,{group:'totals',name:key,page,pageId:res.pageId,rect,raw:found.raw,normalized:found.normalized,value:found.value,confidence,status:found.status,reason:found.reason});
       const id=fieldKey('totals',key),prior=r.ocrMeta.fields[id];
-      if(found.value!==null){if(prior?.ocrValue!==null&&prior?.ocrValue!==undefined&&prior.ocrValue!==found.value)r.ocrMeta.fields[id]={...prior,status:'ambiguous',reason:'CONFLICTING_READS'};else{r.totals[key]=found.value;r.ocrMeta.fields[id]={status:(res.confidence??0)<60?'needsReview':'parsed',page:prior?.page||res.sourcePage||index+1,pageId:prior?.pageId||res.pageId||null,confidence:Math.max(prior?.confidence||0,res.confidence??0),reason:null,ocrValue:found.value};}}else if(!prior)r.ocrMeta.fields[id]={status:found.status,page:res.sourcePage||index+1,pageId:res.pageId||null,confidence:res.confidence??0,reason:found.reason,ocrValue:null};
+      if(found.value!==null){
+        const attempts=[...(prior?.attempts||[]),{value:found.value,status:'parsed',confidence,page,pageId:res.pageId,sourceRect:found.sourceRect,raw:found.raw}],selected=selectOcrCandidate(attempts),source=attempts.find(attempt=>attempt.page===selected.page);
+        r.totals[key]=selected.value;r.ocrMeta.fields[id]={status:selected.status,page:selected.page,pageId:source?.pageId||null,sourceRect:source?.sourceRect||null,confidence:selected.confidence,reason:selected.reason,ocrValue:selected.value,candidates:selected.candidates,attempts};
+      }else if(!prior)r.ocrMeta.fields[id]={status:found.status,page,pageId:res.pageId||null,sourceRect:found.sourceRect||null,confidence:res.confidence??0,reason:found.reason,ocrValue:null,candidates:[],attempts:[]};
     }
   }
   r.ocr=results.map((x,i)=>({page:x.sourcePage||i+1,text:x.text||'',confidence:x.confidence??0}));
@@ -86,7 +100,7 @@ export async function recognize(pages,onProgress=()=>{},options={}) {
     for(current=0;current<pages.length;current++){
       abortError(signal);if(performance.now()-started>300000)throw Object.assign(Error('OCR 工作超過 5 分鐘，已停止。'),{code:'JOB_TIMEOUT'});
       const canvas=await transform(pages[current],true);const result=await runWithCancel(worker.recognize(canvas.toDataURL('image/png'),{},{text:true,blocks:true}),15000,'PAGE_TIMEOUT',signal,()=>worker);canvas.remove();
-      results.push({text:result.data.text,confidence:result.data.confidence,sourcePage:pages[current].originalPage||current+1,pageId:pages[current].pageId});onProgress(`第 ${current+1} 頁辨識完成`,.25+.65*(current+1)/pages.length);
+      results.push({text:result.data.text,lines:flattenOcrLines(result.data.blocks),confidence:result.data.confidence,sourcePage:pages[current].originalPage||current+1,pageId:pages[current].pageId});onProgress(`第 ${current+1} 頁辨識完成`,.25+.65*(current+1)/pages.length);
     }
     const r=parseOCR(results,{job});r.sources=await Promise.all(pages.map(async(p,i)=>({name:p.name,page:i+1,data:(await transform(p)).toDataURL('image/png'),hash:p.hash})));onProgress('欄位配對與校驗',.98);onProgress('辨識完成',1);return r;
   }catch(error){if(!worker)cancelPending=true;if(error.code==='PAGE_TIMEOUT'||error.code==='ENGINE_INIT_TIMEOUT'||error.code==='PARAMETERS_TIMEOUT'||error.code==='JOB_TIMEOUT')error.message='OCR 已逾時（'+error.code+'），圖片仍保留，可重新嘗試。';throw error;}

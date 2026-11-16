@@ -22,7 +22,7 @@ for(const f of ['style.css','manifest.webmanifest','icon.svg'])await copyFile(f,
 await cp('icons',path.join(dist,'icons'),{recursive:true});
 await mkdir(path.join(dist,release,'src'),{recursive:true});
 await cp('src',path.join(dist,release,'src'),{recursive:true});
-await writeFile(path.join(dist,release,'src/build-meta.js'),`export const BUILD_META=${JSON.stringify({appVersion:'1.2.1-ocr-candidate',buildId,ocrEngine:'Tesseract.js 6.0.1',resourceVersion:'sha256-content'})};\n`);
+await writeFile(path.join(dist,release,'src/build-meta.js'),`export const BUILD_META=${JSON.stringify({appVersion:'1.2.2-ocr-r4-candidate',buildId,ocrEngine:'Tesseract.js 6.0.1',resourceVersion:'sha256-content'})};\n`);
 await mkdir(path.join(dist,'vendor/tesseract'),{recursive:true});await mkdir(path.join(dist,'vendor/core'),{recursive:true});await mkdir(path.join(dist,'vendor/lang'),{recursive:true});await mkdir(path.join(dist,'vendor/pdf'),{recursive:true});
 for(const file of ['tesseract.min.js','worker.min.js'])await copyFile(path.join('node_modules/tesseract.js/dist',file),path.join(dist,'vendor/tesseract',file));
 const coreFiles=(await readdir('node_modules/tesseract.js-core')).filter(f=>/^tesseract-core(?:-simd)?(?:-lstm)?\.wasm(?:\.js)?$/.test(f));
@@ -46,7 +46,7 @@ const pdfFiles=[];for(const p of await walk(path.join(dist,'vendor/pdf')))pdfFil
 const groupHash=assets=>hashText(assets.map(x=>x.path+':'+x.sha256).sort().join('\n')).slice(0,20);
 const groups={common:{hash:groupHash(commonAssets),assets:commonAssets},fixed:{hash:groupHash(fixedAssets),assets:fixedAssets},generic:{hash:groupHash(genericAssets),assets:genericAssets},pdf:{hash:groupHash(pdfFiles),assets:pdfFiles}};
 const shellHash=groupHash(files);
-const manifest={buildId,appVersion:'1.2.1-ocr-candidate',shell:{hash:shellHash,assets:files},groups};
+const manifest={buildId,appVersion:'1.2.2-ocr-r4-candidate',shell:{hash:shellHash,assets:files},groups};
 await writeFile(path.join(dist,'asset-manifest.json'),JSON.stringify(manifest,null,2));
 
 const config=JSON.stringify({buildId,shellHash,shellAssets:files,groups,scopeSuffix:new URL('https://local.invalid/').pathname});
